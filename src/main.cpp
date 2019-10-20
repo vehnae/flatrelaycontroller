@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <EtherCard.h>
 #include "indexhtml.h"
+#include "config.h"
 
 enum State
 {
@@ -8,7 +9,6 @@ enum State
 	ON
 };
 
-#define AUTH_PASSWORD ""  // base64-encoded user:password
 #define ETHERNET_BUFFER_SIZE 1000
 #define TRANSMIT_SIZE 950
 
