@@ -16,6 +16,10 @@ static byte macAddress[] = { 0x32, 0x9D, 0x14, 0x66, 0x7D, 0x65 };
 byte Ethernet::buffer[ETHERNET_BUFFER_SIZE];
 static BufferFiller bfill;
 
+const static uint8_t ip[] = {10,1,2,109};
+const static uint8_t gw[] = {10,1,2,1};
+const static uint8_t dns[] = {8,8,8,8};
+
 static int relayPins[] = { 8, 7, 6, 5 };
 static State relayState[] = { OFF, OFF, OFF, OFF };
 static int flatRelayPin = 8;
@@ -31,8 +35,9 @@ void setup() {
     if (ether.begin(sizeof Ethernet::buffer, macAddress, SS) == 0) {
         Serial.println("Ethernet failed");
     } else {
-        if (!ether.dhcpSetup())
-            Serial.println("DHCP failed");
+        ether.staticSetup(ip, gw, dns);
+/*        if (!ether.dhcpSetup())
+            Serial.println("DHCP failed"); */
     }
 }
 
