@@ -1,0 +1,4 @@
+#define AUTH_PASSWORD ""  // base64-encoded user:password
+#define IP ip(192, 168, 1, 177)
+#define GATEWAY gateway(192, 168, 1, 1)
+

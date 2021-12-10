@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include <EtherCard.h>
+#include <EthernetENC.h>
 #include "indexhtml.h"
 #include "config.h"
 
@@ -9,16 +9,18 @@ enum State
 	ON
 };
 
-#define ETHERNET_BUFFER_SIZE 1000
-#define TRANSMIT_SIZE 950
+#define ETHERNET_BUFFER_SIZE 600
+static char data[ETHERNET_BUFFER_SIZE];
+
 
 static byte macAddress[] = { 0x32, 0x9D, 0x14, 0x66, 0x7D, 0x65 };
-byte Ethernet::buffer[ETHERNET_BUFFER_SIZE];
-static BufferFiller bfill;
+static IPAddress IP;
+static IPAddress GATEWAY;
+static IPAddress dnsServer(8, 8, 8, 8);
+static IPAddress netmask(255, 255, 255, 0);
 
-const static uint8_t ip[] = {10,1,2,109};
-const static uint8_t gw[] = {10,1,2,1};
-const static uint8_t dns[] = {8,8,8,8};
+static EthernetServer server(80);
+static const char AUTHHEADER[] PROGMEM = "Authorization: Basic " AUTH_PASSWORD;
 
 static int relayPins[] = { 8, 7, 6, 5 };
 static State relayState[] = { OFF, OFF, OFF, OFF };
@@ -27,18 +29,18 @@ static int deviceId = 19; // FLAT_MAN
 
 int lightStatus = OFF;
 
+void initNetwork() {
+}
+
 void setup() {
     Serial.begin(9600);
     pinMode(flatRelayPin, OUTPUT);
     digitalWrite(flatRelayPin, LOW);
 
-    if (ether.begin(sizeof Ethernet::buffer, macAddress, SS) == 0) {
-        Serial.println("Ethernet failed");
-    } else {
-        ether.staticSetup(ip, gw, dns);
-/*        if (!ether.dhcpSetup())
-            Serial.println("DHCP failed"); */
-    }
+    Ethernet.init(SS);
+    Ethernet.begin(macAddress, ip, dnsServer, gateway, netmask);
+    
+    server.begin();
 }
 
 void setRelay(int relay, State state) {
@@ -46,83 +48,109 @@ void setRelay(int relay, State state) {
     relayState[relay-1] = state;
 }
 
-void send200OK() {
-    bfill.emit_p(PSTR(
-                "HTTP/1.0 200 OK\r\n"
-                "\r\n"));
-    ether.httpServerReply(bfill.position());
+void send200OK(EthernetClient client) {
+    client.println(F("HTTP/1.0 200 OK"));
+    client.println();
+    delay(10);
+    client.stop();
 }
 
-void send404NotFound() {
-    bfill.emit_p(PSTR(
-                "HTTP/1.0 404 Not Found\r\n"
-                "\r\n"));
-    ether.httpServerReply(bfill.position());
+void send400BadRequest(EthernetClient client) {
+    client.println(F("HTTP/1.0 400 Bad Request"));
+    client.println();
+    delay(10);
+    client.stop();
 }
 
-void send401Unauthorized() {
-    bfill.emit_p(PSTR(
-                "HTTP/1.0 401 Unauthorized\r\n"
-                "WWW-Authenticate: Basic realm=\"Komakallio IP Switch\"\r\n"
-                "\r\n"));
-    ether.httpServerReply(bfill.position());
+
+void send404NotFound(EthernetClient client) {
+    client.println(F("HTTP/1.0 404 Not Found"));
+    client.println();
+    delay(10);
+    client.stop();
 }
 
-void send500Error() {
-    bfill.emit_p(PSTR(
-                "HTTP/1.0 500 Internal Server Error\r\n"
-                "\r\n"));
-    ether.httpServerReply(bfill.position());
+void send401Unauthorized(EthernetClient client) {
+    client.println(F("HTTP/1.0 401 Unauthorized"));
+    client.println(F("WWW-Authenticate: Basic realm=\"Chilly Astronomers IP Switch\""));
+    client.println();
+    delay(10);
+    client.stop();
 }
 
-void sendIndexPage() {
-    bfill.emit_p(PSTR("HTTP/1.0 200 OK\r\n"
-        "Content-Type: text/html\r\n"
-        "Content-Length: $D\r\n"
-        "\r\n"), index_html_len);
-    ether.httpServerReplyAck();
-    ether.httpServerReply_with_flags(bfill.position(), TCP_FLAGS_ACK_V);
+void send500Error(EthernetClient client) {
+    client.println(F("HTTP/1.0 500 Internal Server Error"));
+    client.println();
+    delay(10);
+    client.stop();
+}
 
-    const char *ptr = (const char *)index_html;
-    int bytesLeft = index_html_len;
-    while (bytesLeft > 0) {
-        int bytesToSend = min(TRANSMIT_SIZE, bytesLeft);
-        memcpy_P(ether.tcpOffset(), ptr, bytesToSend);
-        if (bytesToSend == TRANSMIT_SIZE) {
-            ether.httpServerReply_with_flags(TRANSMIT_SIZE,TCP_FLAGS_ACK_V);
-        } else {
-            ether.httpServerReply_with_flags(bytesLeft,TCP_FLAGS_ACK_V|TCP_FLAGS_FIN_V);
-        }
-        bytesLeft -= bytesToSend;
-        ptr += bytesToSend;
+void sendIndexPage(EthernetClient client) {
+    client.println(F("HTTP/1.0 200 OK"));
+    client.println(F("Content-Type: text/html"));
+    client.print(F("Content-Length: "));
+    client.println(index_html_len);
+    client.println();
+    const unsigned char* src = index_html;
+    int bytesToSend = index_html_len;
+    while (bytesToSend > 0) {
+        int chunkSize = min(bytesToSend, ETHERNET_BUFFER_SIZE);
+        memcpy_P(data, src, chunkSize);
+        client.write(data, chunkSize);
+        src += chunkSize;
+        bytesToSend -= chunkSize;
     }
+    client.flush();
+    delay(10);
+    client.stop();
 }
 
-void sendRelayStatus() {
-    bfill.emit_p(PSTR("HTTP/1.0 200 OK\r\n"
-        "Content-Type: application/json\r\n"
-        "\r\n"
-        "{\"state\":[$S,$S,$S,$S]}\r\n"), 
+void sendRelayStatus(EthernetClient client) {
+    client.println(F("HTTP/1.0 200 OK"));
+    client.println();
+    sprintf_P(data, PSTR("{\"state\":[%s,%s,%s,%s]}"), 
         relayState[0] == ON ? "true" : "false", 
         relayState[1] == ON ? "true" : "false", 
         relayState[2] == ON ? "true" : "false", 
         relayState[3] == ON ? "true" : "false");
-    ether.httpServerReply(bfill.position());
+    client.println(data);
+    delay(10);
+    client.stop();
 }
 
-void handleNetwork(int pos) {
-    bfill = ether.tcpOffset();
-    char* data = (char*)&Ethernet::buffer[pos];
+void handleRequest(EthernetClient client) {
+    int pos = 0;
+    unsigned long t = millis();
+    while (1) {
+        while (!client.available()) {
+            delay(10);
+            if ((millis() - t) > 2000) {
+                send400BadRequest(client);
+                return;
+            }
+        }
 
-    if (strlen(AUTH_PASSWORD) > 0 && !strstr(data, "Authorization: Basic " AUTH_PASSWORD)) {
-        send401Unauthorized();
+        int bytesToRead = min(client.available(), ETHERNET_BUFFER_SIZE-pos-1);
+        client.readBytes(&data[pos], bytesToRead);
+        pos += bytesToRead;
+        data[pos] = 0;
+
+        if (pos >= ETHERNET_BUFFER_SIZE-2 ||
+            strstr_P(data, PSTR("\r\n\r\n")) || 
+            strstr_P(data, PSTR("\n\n"))) {
+            break;
+        }
+    }
+
+    if (strlen(AUTH_PASSWORD) > 0 && !strstr_P(data, AUTHHEADER)) {
+        send401Unauthorized(client);
         return;
     }
 
     if (strncmp("GET / ", data, 6) == 0) {
-        sendIndexPage();
+        sendIndexPage(client);
     } else if (strncmp("GET /relay ", data, 11) == 0) {
-        sendRelayStatus();
+        sendRelayStatus(client);
     } else if (strncmp("POST /relay/", data, 12) == 0) {
         State state;
         bool pulse = false;
@@ -133,7 +161,7 @@ void handleNetwork(int pos) {
         } else if (strncmp("/pulse", &data[13], 6) == 0) {
             pulse = true;
         } else {
-            send500Error();
+            send500Error(client);
             return;
         }
 
@@ -141,19 +169,19 @@ void handleNetwork(int pos) {
         if (relay >= 1 && relay <= 4) {
             if (!pulse) {
                 setRelay(relay, state);
-                send200OK();
+                send200OK(client);
             } else {
                 setRelay(relay, ON);
-                send200OK();
+                send200OK(client);
                 delay(1000);
                 setRelay(relay, OFF);
             }
         } else {
-            send500Error();
+            send500Error(client);
             return;
         }
     } else {
-        send404NotFound();
+        send404NotFound(client);
     }
 }
 
@@ -173,39 +201,39 @@ void handleAlnitakSerialTraffic() {
     switch(*cmd)
     {
         case 'P':
-            sprintf(temp, "*P%d000", deviceId);
+            sprintf_P(temp, PSTR("*P%d000"), deviceId);
             Serial.println(temp);
             break;
 
         case 'L':
-            sprintf(temp, "*L%d000", deviceId);
+            sprintf_P(temp, PSTR("*L%d000"), deviceId);
             Serial.println(temp);
             setRelay(1, ON);
             break;
 
         case 'D':
-            sprintf(temp, "*D%d000", deviceId);
+            sprintf_P(temp, PSTR("*D%d000"), deviceId);
             Serial.println(temp);
             setRelay(1, OFF);
             break;
 
         case 'B':
-            sprintf(temp, "*B%d%03d", deviceId, atoi(data));
+            sprintf_P(temp, PSTR("*B%d%03d"), deviceId, atoi(data));
             Serial.println(temp);
             break;
 
         case 'J':
-            sprintf(temp, "*J%d%03d", deviceId, 255);
+            sprintf_P(temp, PSTR("*J%d%03d"), deviceId, 255);
             Serial.println(temp);
             break;
       
         case 'S': 
-            sprintf(temp, "*S%d%d%d%d",deviceId, 0, lightStatus, 1);
+            sprintf_P(temp, PSTR("*S%d%d%d%d"), deviceId, 0, lightStatus, 1);
             Serial.println(temp);
             break;
 
         case 'V':
-            sprintf(temp, "*V%d001", deviceId);
+            sprintf_P(temp, PSTR("*V%d001"), deviceId);
             Serial.println(temp);
             break;
     }    
@@ -216,9 +244,10 @@ void handleAlnitakSerialTraffic() {
 
 void loop() {
     handleAlnitakSerialTraffic();
-    int pos = ether.packetLoop(ether.packetReceive());
-    if (pos) {
-        handleNetwork(pos);
+
+    EthernetClient client = server.available();
+    if (client) {
+        handleRequest(client);
     }
 }
 
