@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <EthernetENC.h>
+#include <avr/wdt.h>
 #include "indexhtml.h"
 #include "config.h"
 
@@ -27,12 +28,32 @@ static State relayState[] = { OFF, OFF, OFF, OFF };
 static int flatRelayPin = 8;
 static int deviceId = 19; // FLAT_MAN
 
+static unsigned long lastTick;
+
 int lightStatus = OFF;
 
-void initNetwork() {
+ISR(WDT_vect) { 
+    if (millis() - lastTick > 4000) {
+        goto *(0x00); 
+    }
+}
+
+void resetWatchdog() {
+    lastTick = millis();
+}
+
+void enableWatchdog() {
+    cli();
+    wdt_reset();
+    WDTCSR = (1<<WDCE)|(1<<WDE);
+    //Start watchdog timer with 4s prescaller
+    WDTCSR = (1<<WDIE) | (1<<WDP2) | (1<<WDP0);
+    sei();
 }
 
 void setup() {
+    resetWatchdog();
+
     Serial.begin(9600);
     pinMode(flatRelayPin, OUTPUT);
     digitalWrite(flatRelayPin, LOW);
@@ -41,6 +62,7 @@ void setup() {
     Ethernet.begin(macAddress, ip, dnsServer, gateway, netmask);
     
     server.begin();
+    enableWatchdog();
 }
 
 void setRelay(int relay, State state) {
@@ -124,7 +146,8 @@ void handleRequest(EthernetClient client) {
     while (1) {
         while (!client.available()) {
             delay(10);
-            if ((millis() - t) > 2000) {
+            resetWatchdog();
+            if ((millis() - t) > 5000) {
                 send400BadRequest(client);
                 return;
             }
@@ -249,5 +272,6 @@ void loop() {
     if (client) {
         handleRequest(client);
     }
+    resetWatchdog();
 }
 
